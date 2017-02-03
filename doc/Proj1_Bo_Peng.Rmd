@@ -1,0 +1,200 @@
+---
+title: Project 1 - How do presidents' reelection status and partisan relationship
+  with their predecessor affect the sentiment of their inauguration speeches.
+author: "Bo Peng - UNI:bp2494"
+output: html_notebook
+---
+
+From the president of a college hockey club to the president of the United States, leaders of all kinds customarily make their inauguration speeches about two thing: commenting on the past and promising the future. Hence it would be reasonable to speculate that the overall tone of a speech would be affected by whether the speaker is a first-time elect or a second-term president, as the part on the past would be more positive if the speaker was commenting on his own work in the office. Afterall, people tend to be more lenient on themselves, especially when they are politicians. Moreover, I suspect that the sentiment of an inauguration speech would be even more harsh if the speaker was not only a first-time elect, but also taking the office from a predecessor of the opposite party. In this project I attempt to approach these conjectures.
+
+
+
+----------------------------------------------------------------------------------
+
+Step 0: Setting up master working directory and load packages.
+```{r setup}
+knitr::opts_knit$set(root.dir = 'C:/Users/Lloyd/Documents/GitHub/Spr2017-Proj1-bpeng93')
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+# a list of packages needed
+packages.used=c("rvest", "tibble", "qdap", 
+                "sentimentr", "gplots", "dplyr",
+                "tm", "syuzhet", "factoextra", 
+                "beeswarm", "scales", "RColorBrewer",
+                "RANN", "tm", "topicmodels")
+
+# check which packages need to be installed
+packages.needed=setdiff(packages.used, 
+                        intersect(installed.packages()[,1], 
+                                  packages.used))
+# install needed packages
+if(length(packages.needed)>0){
+  install.packages(packages.needed, dependencies = TRUE)
+}
+
+# load packages
+lapply(packages.used, require, character.only = TRUE)
+```
+
+
+
+----------------------------------------------------------------------------------
+
+Step 1: Read in the functions needed to extract speech urls. Read in a list of basic information on inauguration speeches, store it as a data.frame called "info".
+```{r}
+source("lib/plotstacked.R")
+source("lib/speechFuncs.R")
+
+info <- read.csv("data/InaugurationInfo.csv", as.is = TRUE, header = TRUE)
+info <- info[,-2] # get rid of the redundant column
+```
+
+
+
+----------------------------------------------------------------------------------
+
+Step 2: Scrap the speeches from online database.
+```{r}
+main.page <- read_html(x = "http://www.presidency.ucsb.edu/inaugurals.php")
+
+# use function from source file to extract the urls
+inaug = f.speechlinks(main.page)
+# delete erroneous last row
+inaug <- inaug[-nrow(inaug),]
+# attach it to "info"
+info <- cbind(info, inaug)
+
+# store the bodies of speeches as strings and attach them as a column to "info"
+info$fulltext = NA
+for(i in seq(nrow(info))) {
+  text <- read_html(info$urls[i]) %>% # load the page
+    html_nodes(".displaytext") %>% # isloate the text
+    html_text() # get the text
+  info$fulltext[i] = text
+}
+```
+
+
+
+----------------------------------------------------------------------------------
+
+Step 3: Using sentence detection and sentiment detection functions of the "qdap" package, store emotion matrices of the speeches as a list called "emo". Each emotion matrix is nx10, with n = number of sentences in the speech. Each row correponds to a sentence's score on ten basic sentiments (Anger, Anticipation, Disgust, Fear, Joy, Sadness, Surprise, Trust, Negative, Positive). The scores are adjusted to the length of the sentence, otherwise longer sentences would automatically have higher emotion scores. This would cause bias in our results when there exists correlation between the length and sentiment of a sentence. For example, if negative sentences tend to be the shorter ones, then our results would be biased towards the positive side.
+```{r}
+emo <- list()
+
+for (i in 1:nrow(info)){
+  sentences <- sent_detect(info$fulltext[i], endmarks = c("?", ".", "!", ";"))
+  # get rid of non-sentences caused by redundent endmarks
+  sentences <- sentences[grepl("[A-Z]", sentences)]
+  
+    if (length(sentences) > 0){
+    emotions <- get_nrc_sentiment(sentences)
+    # adjust the sentiment scores of each sentence with their length
+    word.count <- word_count(sentences)
+    emo[[i]] <- diag(1/(word.count+0.01))%*%as.matrix(emotions)
+    }
+}
+```
+
+
+
+----------------------------------------------------------------------------------
+
+Step 4: Create a tag to differentiate the reelected ones from the non-reelected ones. Note that the entries marked by "second-term" in the information data.frame are not necessarily the "reelected" ones we want. For instance, Grover Cleveland was not immediately reelected (his second term did not directly ensue his first one). Also, FDR did 4 terms in the war time.
+```{r}
+info$reelect <- rep(0, 58)
+for (i in 2:nrow(info)){
+  info$reelect[i] <- ifelse(info$President[i] == info$President[i-1], 1, 0)
+}
+```
+
+
+
+----------------------------------------------------------------------------------
+
+Step 5: Do the reelected presidents have less to say than the newly elected ones? (Perhaps because they have less harsh comments on the past, or perhaps they just simply lost interest? That is besides the matter.)
+```{r}
+# the "info" does not contain the word count of Donald Trump's speech, so we count it first
+info$Words[58] <- 0
+info$Words <- as.numeric(info$Words)
+info$Words[58] <- sum(word.count)
+
+mean(info$Words[info$reelect == 0])
+mean(info$Words[info$reelect == 1])
+```
+It turns out that on average, they do have less to say. 
+
+```{r}
+summary(lm(info$Words ~ factor(info$reelect)))
+```
+The p-value indicates that reelection status of the speaker does have a significant impact on the length of the speech on a 95% confidence level.
+
+
+
+----------------------------------------------------------------------------------
+
+Step 6: Examine the difference between the sentiments of the reelected presidents' speeches and those of the non-reelected ones. In the 8 basic emotions in the "qdap" package, I used 5: Anger, Anticipation, Disgust, Joy and Sadness. I left out Fear, Surprise and Trust because they don't quite fit in the context of a polititcal address. 
+```{r}
+par(mfrow=c(1, 5))
+emo.names <- c("Anger", "Anticipation", "Disgust", NA, "Joy", "Sadness")
+
+for (i in c(1,2,3,5,6)) {
+  non.reelect.emo <- mean(sapply(emo[info$reelect == 0], colMeans)[i, ])
+  reelect.emo <- mean(sapply(emo[info$reelect == 1], colMeans)[i, ])
+  barplot(c(non.reelect.emo, reelect.emo), col = c("lightblue", "khaki"), main = emo.names[i], names.arg = c("Rep", "Relct"))
+}
+```
+The "Rep" in the diagrams means that the speaker is replacing someone in white house, while "Relct" stands for reelected president. The diagrams suggest that when the speaker is replacing another, his speech scores higher on "Anger", "Disgust" and "Sadness", while it scores slightly lower on "Anticipation" and "Joy". 
+
+
+What about the overall tone?
+```{r}
+barplot(c(mean(sapply(emo[info$reelect == 0], colMeans)[9, ]), mean(sapply(emo[info$reelect == 1], colMeans)[9, ])), col = c("lightblue", "khaki"), ylim = c(0, 0.04), main = "Negative", names.arg = c("Rep", "Relct"))
+          
+```
+As suspected, on average, a "non-reelect" speech has a more negative tone than a "relect"" one. This confirms my first conjecture.
+
+
+
+----------------------------------------------------------------------------------
+
+Step 7: What about the partisan relationship between the speaker and his predecessor? Does the speeches get more harsh when the speaker is taking the white house over from an opposite party? 
+
+First create a tag called "diffparty", which =1 if the speaker is replacing someone from the opposite party.
+```{r}
+info$Party[c(1,2)] <- "None"
+info$diffparty <- rep(0, 58)
+for (i in 2:58) {
+  info$diffparty[i] <- ifelse(info$Party[i-1] != info$Party[i], 1, 0)
+}
+```
+
+Then repeat the 5-sentiment approach on the newly divided groups.
+```{r}
+par(mfrow=c(1, 5))
+emo.names <- c("Anger", "Anticipation", "Disgust", NA, "Joy", "Sadness")
+
+for (i in c(1,2,3,5,6)) {
+  non.reelect.emo <- mean(sapply(emo[info$diffparty == 1], colMeans)[i, ])
+  reelect.emo <- mean(sapply(emo[info$diffparty == 0], colMeans)[i, ])
+  barplot(c(non.reelect.emo, reelect.emo), col = c("lightblue", "khaki"), main = emo.names[i], names.arg = c("DP", "SP"))
+}
+```
+The "DP" in the diagrams means that the speaker is replacing someone from a different party, while "SP" stands for same partisanship. Much like the diagram in Part 6, the diagrams suggest that when the speaker is replacing a leader from a different party, his speech scores higher on "Anger", "Disgust" and "Sadness", while it scores lower on "Anticipation" and "Joy". 
+
+```{r}
+barplot(c(mean(sapply(emo[info$diffparty == 1], colMeans)[9, ]), mean(sapply(emo[info$diffparty == 0], colMeans)[9, ])), col = c("lightblue", "khaki"), main = "Negative", names.arg = c("DP", "SP"))
+```
+Also as suspected, on average, DP speeches on average have a more negative tone than SP ones. 
+
+
+
+----------------------------------------------------------------------------------
+
+Step 8: In previous part, SP includes both reelected presidents and the ones taking the office from someone else with the same partisanship. In this part we divide the speakers into three groups: "Rep DP" are those who are replacing someone from a different party, "Rep SP" are those replacing someone from the same party, and "Relct" are the relected presidents.
+```{r}
+barplot(c(mean(sapply(emo[info$diffparty == 1], colMeans)[9, ]), mean(sapply(emo[info$diffparty == 0 & info$reelect == 0], colMeans)[9, ]), mean(sapply(emo[info$reelect == 1], colMeans)[9, ])), col = c("coral4", "coral2", "coral"), ylim = c(0, 0.04), main = "Negative", names.arg = c("Rep DP", "Rep SP", "Relct"))
+```
+The diagram suggests that on average, the ones replacing someone from "the oppsite side of the aisle" tend to give the most negative speeches, while the reelected ones are noticably more postive in their tones. My second conjecture is confirmed.
